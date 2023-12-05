@@ -1,6 +1,6 @@
 # Maistra Istio Operator Integration Test
 
-This integration test suite is similar to the upstream Istio integration tests. The scripts `lib.sh`, `kind_provisioner.sh` and `istio-integ-suite-kind.sh` are copied from `github.com/maistra/istio` repo.
+This integration test suite is similar to the upstream Istio integration tests. The scripts `lib.sh`, `kind_provisioner.sh` and `istio-run-integ-suite-kind.sh` are copied from `github.com/maistra/istio` repo.
 
 ## Pre-requisites
 

@@ -143,11 +143,11 @@ test.scorecard: operator-sdk
 
 .PHONY: test.integration.ocp
 test.integration.ocp:
-	${SOURCE_DIR}/tests/integration/integ-suite-ocp.sh
+	${SOURCE_DIR}/tests/integration/run-integ-suite-ocp.sh
 
 .PHONY: test.integration.kind
 test.integration.kind:
-	${SOURCE_DIR}/tests/integration/integ-suite-kind.sh
+	${SOURCE_DIR}/tests/integration/run-integ-suite-kind.sh
 
 ##@ Build
 

@@ -78,48 +78,6 @@ initialize_variables() {
   TIMEOUT="3m"
 }
 
-get_internal_registry() {
-  # Validate that the internal registry is running, configure the variable to be used in the Makefile. 
-  # If there is no internal registry, the test can't be executed targeting to the internal registry
-
-  # Check if the registry pods are running
-  ${COMMAND} get pods -n openshift-image-registry --no-headers | grep -v "Running" && echo "It looks like the OCP image registry is not deployed or Running. This tests scenario requires it. Aborting." && exit 1
-
-  # Check if default route already exist
-  if [ -z "$(${COMMAND} get route default-route -n openshift-image-registry -o name)" ]; then
-    echo "Route default-route does not exist, patching DefaultRoute to true on Image Registry."
-    ${COMMAND} patch configs.imageregistry.operator.openshift.io/cluster --patch '{"spec":{"defaultRoute":true}}' --type=merge
-  
-    timeout --foreground -v -s SIGHUP -k ${TIMEOUT} ${TIMEOUT} bash --verbose -c \
-      "until ${COMMAND} get route default-route -n openshift-image-registry &> /dev/null; do sleep 5; done && echo 'The 'default-route' has been created.'"
-  fi
-
-  # Get the registry route
-  URL=$(${COMMAND} get route default-route -n openshift-image-registry --template='{{ .spec.host }}')
-  # Hub will be equal to the route url/project-name(NameSpace) 
-  export HUB="${URL}/${NAMESPACE}"
-  echo "Internal registry URL: ${HUB}"
-
-  # Create namespace where operator will be located
-  # This is needed because the roles are created in the namespace where the operator is deployed
-  ${COMMAND} create namespace "${NAMESPACE}" || true
-
-  # Adding roles to avoid the need to be authenticated to push images to the internal registry
-  # Using envsubst to replace the variable NAMESPACE in the yaml file
-  envsubst < "${WD}/config/role-bindings.yaml" | ${COMMAND} apply -f -
-
-  # Login to the internal registry when running on CRC
-  # Take into count that you will need to add before the registry URL as Insecure registry in "/etc/docker/daemon.json"
-  if [[ ${URL} == *".apps-crc.testing"* ]]; then
-    echo "Executing Docker login to the internal registry"
-    if ! oc whoami -t | docker login -u "$(${COMMAND} whoami)" --password-stdin "${URL}"; then
-      echo "***** Error: Failed to log in to Docker registry."
-      echo "***** Check the error and if is related to 'tls: failed to verify certificate' please add the registry URL as Insecure registry in '/etc/docker/daemon.json'"
-      exit 1
-    fi
-  fi
-}
-
 build_and_push_image() {
   # Build and push docker image
   # Notes: to be able to build and push to the local registry we need to set these variables to be used in the Makefile
@@ -128,21 +86,6 @@ build_and_push_image() {
   echo "Image base: ${IMAGE_BASE}"
   echo " Tag: ${TAG}"
   IMAGE=${HUB}/${IMAGE_BASE}:${TAG} make docker-build docker-push
-}
-
-deploy_operator() {
-  echo "Deploying Operator"
-  local TARGET="deploy"
-  if [ "${OCP}" == "true" ]; then
-    # This is a workaround
-    # To avoid errors of certificates meanwhile we are pulling the operator image from the internal registry
-    # We need to set image $HUB to a fixed known value
-    # This value always will be equal to the svc url of the internal registry
-    HUB="image-registry.openshift-image-registry.svc:5000/istio-operator"
-
-    TARGET="deploy-openshift"
-  fi
-  IMAGE=${HUB}/${IMAGE_BASE}:${TAG} make -s --no-print-directory ${TARGET}
 }
 
 check_ready() {
@@ -242,17 +185,9 @@ parse_flags "$@"
 initialize_variables
 
 if [ "${SKIP_BUILD}" == "false" ]; then
-  # SETUP
-  if [ "${OCP}" == "true" ]; then
-    # Internal Registry is only available in OCP clusters
-    get_internal_registry
-  fi
-
-  # BUILD AND PUSH IMAGE
+  # BUILD AND PUSH IMAGE when SKIP_BUILD is false
   build_and_push_image
 fi
 
-# Deploy the operator
-deploy_operator
-# RUNNING TEST VALIDATIONS
-main_test
+# Run the test file
+HUB=${HUB} URL=${URL} NAMESPACE=${NAMESPACE} SKIP_BUILD=${SKIP_BUILD} IMAGE_BASE=${IMAGE_BASE} TAG=${TAG} DEPLOYMENT_NAME=${DEPLOYMENT_NAME} DEPLOY_OPERATOR=${DEPLOY_OPERATOR} WD=${WD} go test -v ./tests/integration/installation/...
