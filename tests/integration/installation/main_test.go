@@ -3,6 +3,7 @@ package installation
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"testing"
 )
 
@@ -20,7 +21,7 @@ var (
 	namespace        = getenv("NAMESPACE", "istio-operator")
 	deployment_name  = getenv("DEPLOYMENT_NAME", "istio-operator")
 	control_plane_ns = getenv("CONTROL_PLANE_NS", "istio-system")
-	wd               = os.Getenv("WD")
+	wd, _            = os.Getwd()
 	deploy_operator  = getenv("DEPLOY_OPERATOR", "true")
 	target           = "deploy"
 )
@@ -71,6 +72,17 @@ func setup() {
 
 func setupRunOCP() {
 	// The run-integ-suite-ocp.sh runs the setup before running the test, for additional custom setup run the code here
+	// Execute ls on /home/fedora/repos/istio-operator dir
+
+	cmd := exec.Command("ls", "-l")
+	cmd.Dir = "/home/fedora/repos/istio-operator"
+	err := cmd.Run()
+	if err != nil {
+
+		fmt.Printf("Error running ls: %v\n", err)
+		os.Exit(1)
+	}
+
 }
 
 func setupRunKind() {

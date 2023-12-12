@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -87,18 +88,38 @@ func deployOpenShift() error {
 
 func setControllerImage() error {
 	print("Setting Controller Image\n")
+	print("Command: " + kustomize + " edit set image controller=" + image)
 	cmd := exec.Command(kustomize, "edit", "set", "image", fmt.Sprintf("controller=%s", image))
-	cmd.Dir = "/home/fedora/repos/istio-operator/config/manager"
-	print("********** Command **********\n")
-	print(cmd)
+	dir, _ := getBaseDirectory()
+	cmd.Dir = dir + "/config/manager"
 	return cmd.Run()
 }
 
 func setNamespace() error {
 	print("Setting Namespace\n")
 	cmd := exec.Command(kustomize, "edit", "set", "namespace", namespace)
-	cmd.Dir = wd + "/home/fedora/repos/istio-operator/config/default"
-	print("********** Command **********\n")
-	print(cmd)
+	cmd.Dir = wd + "/config/default"
 	return cmd.Run()
+}
+
+func getBaseDirectory() (string, error) {
+	// Get the absolute path of the currently running executable
+	executablePath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+
+	// Get the directory of the executable
+	executableDir := filepath.Dir(executablePath)
+
+	// Navigate up one directory to get the base directory of the project
+	baseDir := filepath.Join(executableDir, "..")
+
+	// Convert to absolute path
+	absBaseDir, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", err
+	}
+
+	return absBaseDir, nil
 }
