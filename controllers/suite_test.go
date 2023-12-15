@@ -71,7 +71,11 @@ var _ = BeforeSuite(func() {
 		panic(err)
 	}
 
+<<<<<<< Updated upstream:controllers/suite_test.go
 	controller := NewIstioReconciler(mgr.GetClient(), mgr.GetScheme(), mgr.GetConfig(), path.Join(common.RepositoryRoot, "resources"), []string{"default"})
+=======
+	controller := NewIstioRevisionReconciler(mgr.GetClient(), mgr.GetScheme(), mgr.GetConfig())
+>>>>>>> Stashed changes:controllers/istiorevision/suite_test.go
 	err = controller.SetupWithManager(mgr)
 	if err != nil {
 		panic(err)
