@@ -63,5 +63,5 @@ setup_kind_cluster "${KIND_CLUSTER_NAME}" "" "" "true" "true"
 setup_kind_registry
 
 # Run the integration tests
-echo "Running integration tests"
+echo "Setup on Kind completed. Running integration tests..."
 ./tests/integration/common-operator-integ-suite.sh --kind
