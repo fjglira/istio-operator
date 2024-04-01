@@ -114,7 +114,7 @@ type IstioStatus struct {
 	Revisions RevisionSummary `json:"revisions,omitempty"`
 }
 
-// IstioRevisions contains information on the number of IstioRevisions associated with this Istio.
+// RevisionSummary contains information on the number of IstioRevisions associated with this Istio.
 type RevisionSummary struct {
 	// Total number of IstioRevisions currently associated with this Istio.
 	Total int32 `json:"total"`
@@ -170,7 +170,7 @@ func (s *IstioStatus) SetCondition(condition IstioCondition) {
 	s.Conditions = append(s.Conditions, condition)
 }
 
-// A Condition represents a specific observation of the object's state.
+// IstioCondition represents a specific observation of the IstioCondition object's state.
 type IstioCondition struct {
 	// The type of this condition.
 	Type IstioConditionType `json:"type,omitempty"`
@@ -197,32 +197,35 @@ type IstioConditionType string
 type IstioConditionReason string
 
 const (
-	// IstioConditionTypeReconciled signifies whether the controller has
+	// IstioConditionReconciled signifies whether the controller has
 	// successfully reconciled the resources defined through the CR.
-	IstioConditionTypeReconciled IstioConditionType = "Reconciled"
+	IstioConditionReconciled IstioConditionType = "Reconciled"
 
-	// IstioConditionReasonReconcileError indicates that the reconciliation of the resource has failed, but will be retried.
-	IstioConditionReasonReconcileError IstioConditionReason = "ReconcileError"
+	// IstioReasonReconcileError indicates that the reconciliation of the resource has failed, but will be retried.
+	IstioReasonReconcileError IstioConditionReason = "ReconcileError"
 )
 
 const (
-	// IstioConditionTypeReady signifies whether any Deployment, StatefulSet,
+	// IstioConditionReady signifies whether any Deployment, StatefulSet,
 	// etc. resources are Ready.
-	IstioConditionTypeReady IstioConditionType = "Ready"
+	IstioConditionReady IstioConditionType = "Ready"
 
-	// IstioConditionReasonIstioRevisionNotFound indicates that the active IstioRevision is not found.
-	IstioConditionReasonIstioRevisionNotFound IstioConditionReason = "ActiveRevisionNotFound"
+	// IstioReasonRevisionNotFound indicates that the active IstioRevision is not found.
+	IstioReasonRevisionNotFound IstioConditionReason = "ActiveRevisionNotFound"
 
-	// IstioConditionReasonIstiodNotReady indicates that the control plane is fully reconciled, but istiod is not ready.
-	IstioConditionReasonIstiodNotReady IstioConditionReason = "IstiodNotReady"
+	// IstioReasonFailedToGetActiveRevision indicates that a failure occurred when getting the active IstioRevision
+	IstioReasonFailedToGetActiveRevision IstioConditionReason = "FailedToGetActiveRevision"
 
-	// IstioConditionReasonCNINotReady indicates that the control plane is fully reconciled, but istio-cni-node is not ready.
-	IstioConditionReasonCNINotReady IstioConditionReason = "CNINotReady"
+	// IstioReasonIstiodNotReady indicates that the control plane is fully reconciled, but istiod is not ready.
+	IstioReasonIstiodNotReady IstioConditionReason = "IstiodNotReady"
+
+	// IstioReasonReadinessCheckFailed indicates that readiness could not be ascertained.
+	IstioReasonReadinessCheckFailed IstioConditionReason = "ReadinessCheckFailed"
 )
 
 const (
-	// IstioConditionReasonHealthy indicates that the control plane is fully reconciled and that all components are ready.
-	IstioConditionReasonHealthy IstioConditionReason = "Healthy"
+	// IstioReasonHealthy indicates that the control plane is fully reconciled and that all components are ready.
+	IstioReasonHealthy IstioConditionReason = "Healthy"
 )
 
 // +kubebuilder:object:root=true

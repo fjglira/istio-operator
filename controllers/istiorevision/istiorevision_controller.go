@@ -16,14 +16,16 @@ package istiorevision
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"reflect"
 	"regexp"
-	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/istio-ecosystem/sail-operator/api/v1alpha1"
+	"github.com/istio-ecosystem/sail-operator/pkg/constants"
+	"github.com/istio-ecosystem/sail-operator/pkg/errlist"
 	"github.com/istio-ecosystem/sail-operator/pkg/helm"
 	"github.com/istio-ecosystem/sail-operator/pkg/kube"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
@@ -32,7 +34,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -55,6 +57,8 @@ const (
 	IstioInjectionEnabledValue = "enabled"
 	IstioRevLabel              = "istio.io/rev"
 	IstioSidecarInjectLabel    = "sidecar.istio.io/inject"
+
+	finalizer = constants.FinalizerName
 )
 
 // IstioRevisionReconciler reconciles an IstioRevision object
@@ -98,26 +102,22 @@ func (r *IstioRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	log := logf.FromContext(ctx)
 	var rev v1alpha1.IstioRevision
 	if err := r.Client.Get(ctx, req.NamespacedName, &rev); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			log.V(2).Info("IstioRevision not found. Skipping reconciliation")
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "failed to get IstioRevision from cluster")
+		return ctrl.Result{}, fmt.Errorf("failed to get IstioRevision: %v", err)
 	}
 
 	if rev.DeletionTimestamp != nil {
 		if err := r.uninstallHelmCharts(ctx, &rev); err != nil {
 			return ctrl.Result{}, err
 		}
-		return kube.RemoveFinalizer(ctx, &rev, r.Client)
+		return kube.RemoveFinalizer(ctx, r.Client, &rev, finalizer)
 	}
 
-	if !kube.HasFinalizer(&rev) {
-		err := kube.AddFinalizer(ctx, &rev, r.Client)
-		if err != nil {
-			log.Info("failed to add finalizer")
-			return ctrl.Result{}, err
-		}
+	if !kube.HasFinalizer(&rev, finalizer) {
+		return kube.AddFinalizer(ctx, r.Client, &rev, finalizer)
 	}
 
 	if err := validateIstioRevision(rev); err != nil {
@@ -125,16 +125,12 @@ func (r *IstioRevisionReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	log.Info("Installing components")
-	err := r.installHelmCharts(ctx, &rev)
+	reconcileErr := r.installHelmCharts(ctx, &rev)
 
 	log.Info("Reconciliation done. Updating status.")
-	err = r.updateStatus(ctx, &rev, err)
-	if errors.IsConflict(err) {
-		log.Info("Status update failed. Requeuing reconciliation")
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-	}
+	statusErr := r.updateStatus(ctx, &rev, reconcileErr)
 
-	return ctrl.Result{}, err
+	return ctrl.Result{}, errors.Join(reconcileErr, statusErr)
 }
 
 func validateIstioRevision(rev v1alpha1.IstioRevision) error {
@@ -170,7 +166,7 @@ func (r *IstioRevisionReconciler) installHelmCharts(ctx context.Context, rev *v1
 		BlockOwnerDeletion: ptr.Of(true),
 	}
 
-	values := rev.Spec.Values.ToHelmValues()
+	values := helm.FromValues(rev.Spec.Values)
 	_, err := r.ChartManager.UpgradeOrInstallChart(ctx, r.getChartDir(rev, "istiod"), values, rev.Spec.Namespace, getReleaseName(rev, "istiod"), ownerReference)
 	return err
 }
@@ -244,114 +240,107 @@ func (r *IstioRevisionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *IstioRevisionReconciler) updateStatus(ctx context.Context, rev *v1alpha1.IstioRevision, err error) error {
-	log := logf.FromContext(ctx)
-	reconciledCondition := r.determineReconciledCondition(err)
-	readyCondition := r.determineReadyCondition(ctx, rev)
-	inUseCondition, err := r.determineInUseCondition(ctx, rev)
-	if err != nil {
-		return err
-	}
+func (r *IstioRevisionReconciler) determineStatus(ctx context.Context, rev *v1alpha1.IstioRevision, reconcileErr error) (v1alpha1.IstioRevisionStatus, error) {
+	var errs errlist.Builder
+	reconciledCondition := r.determineReconciledCondition(reconcileErr)
+	readyCondition, err := r.determineReadyCondition(ctx, rev)
+	errs.Add(err)
 
-	status := rev.Status.DeepCopy()
+	inUseCondition, err := r.determineInUseCondition(ctx, rev)
+	errs.Add(err)
+
+	status := *rev.Status.DeepCopy()
 	status.ObservedGeneration = rev.Generation
 	status.SetCondition(reconciledCondition)
 	status.SetCondition(readyCondition)
 	status.SetCondition(inUseCondition)
 	status.State = deriveState(reconciledCondition, readyCondition)
+	return status, errs.Error()
+}
 
-	if reflect.DeepEqual(rev.Status, *status) {
-		return nil
+func (r *IstioRevisionReconciler) updateStatus(ctx context.Context, rev *v1alpha1.IstioRevision, reconcileErr error) error {
+	var errs errlist.Builder
+
+	status, err := r.determineStatus(ctx, rev, reconcileErr)
+	errs.Add(err)
+
+	if !reflect.DeepEqual(rev.Status, status) {
+		errs.Add(r.Client.Status().Patch(ctx, rev, kube.NewStatusPatch(status)))
 	}
-
-	statusErr := r.Client.Status().Patch(ctx, rev, kube.NewStatusPatch(*status))
-	if statusErr != nil {
-		log.Error(statusErr, "failed to patch status")
-
-		// ensure that we retry the reconcile by returning the status error
-		// (but without overriding the original error)
-		if err == nil {
-			return statusErr
-		}
-	}
-	return err
+	return errs.Error()
 }
 
 func deriveState(reconciledCondition, readyCondition v1alpha1.IstioRevisionCondition) v1alpha1.IstioRevisionConditionReason {
-	if reconciledCondition.Status == metav1.ConditionFalse {
+	if reconciledCondition.Status != metav1.ConditionTrue {
 		return reconciledCondition.Reason
-	} else if readyCondition.Status == metav1.ConditionFalse {
+	} else if readyCondition.Status != metav1.ConditionTrue {
 		return readyCondition.Reason
 	}
-
-	return v1alpha1.IstioRevisionConditionReasonHealthy
+	return v1alpha1.IstioRevisionReasonHealthy
 }
 
 func (r *IstioRevisionReconciler) determineReconciledCondition(err error) v1alpha1.IstioRevisionCondition {
-	if err == nil {
-		return v1alpha1.IstioRevisionCondition{
-			Type:   v1alpha1.IstioRevisionConditionTypeReconciled,
-			Status: metav1.ConditionTrue,
-		}
-	}
+	c := v1alpha1.IstioRevisionCondition{Type: v1alpha1.IstioRevisionConditionReconciled}
 
-	return v1alpha1.IstioRevisionCondition{
-		Type:    v1alpha1.IstioRevisionConditionTypeReconciled,
-		Status:  metav1.ConditionFalse,
-		Reason:  v1alpha1.IstioRevisionConditionReasonReconcileError,
-		Message: fmt.Sprintf("error reconciling resource: %v", err),
+	if err == nil {
+		c.Status = metav1.ConditionTrue
+	} else {
+		c.Status = metav1.ConditionFalse
+		c.Reason = v1alpha1.IstioRevisionReasonReconcileError
+		c.Message = fmt.Sprintf("error reconciling resource: %v", err)
 	}
+	return c
 }
 
-func (r *IstioRevisionReconciler) determineReadyCondition(ctx context.Context, rev *v1alpha1.IstioRevision) v1alpha1.IstioRevisionCondition {
-	notReady := func(reason v1alpha1.IstioRevisionConditionReason, message string) v1alpha1.IstioRevisionCondition {
-		return v1alpha1.IstioRevisionCondition{
-			Type:    v1alpha1.IstioRevisionConditionTypeReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  reason,
-			Message: message,
-		}
+func (r *IstioRevisionReconciler) determineReadyCondition(ctx context.Context, rev *v1alpha1.IstioRevision) (v1alpha1.IstioRevisionCondition, error) {
+	c := v1alpha1.IstioRevisionCondition{
+		Type:   v1alpha1.IstioRevisionConditionReady,
+		Status: metav1.ConditionFalse,
 	}
 
 	istiod := appsv1.Deployment{}
-	if err := r.Client.Get(ctx, istiodDeploymentKey(rev), &istiod); err != nil {
-		if errors.IsNotFound(err) {
-			return notReady(v1alpha1.IstioRevisionConditionReasonIstiodNotReady, "istiod Deployment not found")
+	if err := r.Client.Get(ctx, istiodDeploymentKey(rev), &istiod); err == nil {
+		if istiod.Status.Replicas == 0 {
+			c.Reason = v1alpha1.IstioRevisionReasonIstiodNotReady
+			c.Message = "istiod Deployment is scaled to zero replicas"
+		} else if istiod.Status.ReadyReplicas < istiod.Status.Replicas {
+			c.Reason = v1alpha1.IstioRevisionReasonIstiodNotReady
+			c.Message = "not all istiod pods are ready"
+		} else {
+			c.Status = metav1.ConditionTrue
 		}
-		return notReady(v1alpha1.IstioRevisionConditionReasonReconcileError, fmt.Sprintf("failed to get readiness: %v", err))
+	} else if apierrors.IsNotFound(err) {
+		c.Reason = v1alpha1.IstioRevisionReasonIstiodNotReady
+		c.Message = "istiod Deployment not found"
+	} else {
+		c.Status = metav1.ConditionUnknown
+		c.Reason = v1alpha1.IstioRevisionReasonReadinessCheckFailed
+		c.Message = fmt.Sprintf("failed to get readiness: %v", err)
+		return c, err
 	}
-	if istiod.Status.Replicas == 0 {
-		return notReady(v1alpha1.IstioRevisionConditionReasonIstiodNotReady, "istiod Deployment is scaled to zero replicas")
-	} else if istiod.Status.ReadyReplicas < istiod.Status.Replicas {
-		return notReady(v1alpha1.IstioRevisionConditionReasonIstiodNotReady, "not all istiod pods are ready")
-	}
-
-	return v1alpha1.IstioRevisionCondition{
-		Type:   v1alpha1.IstioRevisionConditionTypeReady,
-		Status: metav1.ConditionTrue,
-	}
+	return c, nil
 }
 
 func (r *IstioRevisionReconciler) determineInUseCondition(ctx context.Context, rev *v1alpha1.IstioRevision) (v1alpha1.IstioRevisionCondition, error) {
-	isReferenced, err := r.isRevisionReferencedByWorkloads(ctx, rev)
-	if err != nil {
-		return v1alpha1.IstioRevisionCondition{}, err
-	}
+	c := v1alpha1.IstioRevisionCondition{Type: v1alpha1.IstioRevisionConditionInUse}
 
-	if isReferenced {
-		return v1alpha1.IstioRevisionCondition{
-			Type:    v1alpha1.IstioRevisionConditionTypeInUse,
-			Status:  metav1.ConditionTrue,
-			Reason:  v1alpha1.IstioRevisionConditionReasonReferencedByWorkloads,
-			Message: "Referenced by at least one pod or namespace",
-		}, nil
+	isReferenced, err := r.isRevisionReferencedByWorkloads(ctx, rev)
+	if err == nil {
+		if isReferenced {
+			c.Status = metav1.ConditionTrue
+			c.Reason = v1alpha1.IstioRevisionReasonReferencedByWorkloads
+			c.Message = "Referenced by at least one pod or namespace"
+		} else {
+			c.Status = metav1.ConditionFalse
+			c.Reason = v1alpha1.IstioRevisionReasonNotReferenced
+			c.Message = "Not referenced by any pod or namespace"
+		}
+	} else {
+		c.Status = metav1.ConditionUnknown
+		c.Reason = v1alpha1.IstioRevisionReasonUsageCheckFailed
+		c.Message = fmt.Sprintf("failed to determine if revision is in use: %v", err)
 	}
-	return v1alpha1.IstioRevisionCondition{
-		Type:    v1alpha1.IstioRevisionConditionTypeInUse,
-		Status:  metav1.ConditionFalse,
-		Reason:  v1alpha1.IstioRevisionConditionReasonNotReferenced,
-		Message: "Not referenced by any pod or namespace",
-	}, nil
+	return c, err
 }
 
 func (r *IstioRevisionReconciler) isRevisionReferencedByWorkloads(ctx context.Context, rev *v1alpha1.IstioRevision) (bool, error) {

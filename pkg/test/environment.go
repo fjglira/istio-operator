@@ -15,9 +15,10 @@
 package test
 
 import (
+	"io"
 	"path"
 
-	"github.com/istio-ecosystem/sail-operator/pkg/common"
+	"github.com/istio-ecosystem/sail-operator/pkg/config"
 	"github.com/istio-ecosystem/sail-operator/pkg/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,11 +27,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
-func SetupEnv() (*envtest.Environment, client.Client, *rest.Config) {
-	logf.SetLogger(zap.New(zap.UseDevMode(true)))
+func SetupEnv(logWriter io.Writer, installCRDs bool) (*envtest.Environment, client.Client, *rest.Config) {
+	logf.SetLogger(zap.New(zap.WriteTo(logWriter), zap.UseDevMode(true)))
+
+	var crdDirectoryPaths []string
+	if installCRDs {
+		crdDirectoryPaths = append(crdDirectoryPaths, path.Join(config.RepositoryRoot, "chart", "crds"))
+	}
 
 	testEnv := &envtest.Environment{
-		CRDDirectoryPaths:     []string{path.Join(common.RepositoryRoot, "chart", "crds")},
+		CRDDirectoryPaths:     crdDirectoryPaths,
 		ErrorIfCRDPathMissing: true,
 	}
 

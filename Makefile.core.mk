@@ -1,16 +1,16 @@
-## Copyright 2019 Red Hat, Inc.
-##
-## Licensed under the Apache License, Version 2.0 (the "License");
-## you may not use this file except in compliance with the License.
-## You may obtain a copy of the License at
-##
-##     http://www.apache.org/licenses/LICENSE-2.0
-##
-## Unless required by applicable law or agreed to in writing, software
-## distributed under the License is distributed on an "AS IS" BASIS,
-## WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-## See the License for the specific language governing permissions and
-## limitations under the License.
+# Copyright Istio Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 # Save the current, builtin variables so we can filter them out in the `print-variables` target
 OLD_VARS := $(.VARIABLES)
@@ -71,7 +71,8 @@ ENVTEST_K8S_VERSION ?= 1.29.0
 # Set DOCKER_BUILD_FLAGS to specify flags to pass to 'docker build', default to empty. Example: --platform=linux/arm64
 DOCKER_BUILD_FLAGS ?= "--platform=$(TARGET_OS)/$(TARGET_ARCH)"
 
-VERBOSE_FLAG := $(if $(VERBOSE),-v)
+GOTEST_FLAGS := $(if $(VERBOSE),-v)
+GINKGO_FLAGS := $(if $(VERBOSE),-v) $(if $(CI),--no-color)
 
 # CHANNELS define the bundle channels used in the bundle.
 # Add a new line here if you would like to change its default config. (E.g CHANNELS = "candidate,fast,stable")
@@ -143,9 +144,17 @@ export
 ##@ Testing
 
 .PHONY: test
-test: envtest ## Run unit tests.
+test: test.unit test.integration ## Run both unit tests and integration test.
+
+.PHONY: test.unit
+test.unit: envtest  ## Run unit tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
-	go test $(VERBOSE_FLAG) ./... -coverprofile cover.out
+	go test $(GOTEST_FLAGS) ./...
+
+.PHONY: test.integration
+test.integration: envtest ## Run integration tests located in the tests/integration directory.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
+	go run github.com/onsi/ginkgo/v2/ginkgo --tags=integration $(GINKGO_FLAGS) ./tests/integration/...
 
 .PHONY: test.scorecard
 test.scorecard: operator-sdk ## Run the operator scorecard test.
@@ -153,15 +162,15 @@ test.scorecard: operator-sdk ## Run the operator scorecard test.
 
 .PHONY: test.e2e.ocp
 test.e2e.ocp: ## Run the end-to-end tests against an existing OCP cluster.
-	${SOURCE_DIR}/tests/e2e/integ-suite-ocp.sh
+	GINKGO_FLAGS="$(GINKGO_FLAGS)" ${SOURCE_DIR}/tests/e2e/integ-suite-ocp.sh
 
 .PHONY: test.e2e.kind
 test.e2e.kind: ## Deploy a KinD cluster and run the end-to-end tests against it.
-	${SOURCE_DIR}/tests/e2e/integ-suite-kind.sh
+	GINKGO_FLAGS="$(GINKGO_FLAGS)" ${SOURCE_DIR}/tests/e2e/integ-suite-kind.sh
 
 .PHONY: test.e2e.describe
 test.e2e.describe: ## Runs ginkgo outline -format indent over the e2e test to show in BDD style the steps and test structure
-	${SOURCE_DIR}/tests/e2e/common-operator-integ-suite.sh --describe
+	GINKGO_FLAGS="$(GINKGO_FLAGS)" ${SOURCE_DIR}/tests/e2e/common-operator-integ-suite.sh --describe
 
 ##@ Build
 
@@ -232,13 +241,13 @@ undefine BUILDX
 endif
 
 .PHONY: docker-buildx
-docker-buildx: test build-all ## Build and push docker image with cross-platform support.
+docker-buildx: build-all ## Build and push docker image with cross-platform support.
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- docker buildx create --name project-v4-builder
+	docker buildx ls --format "{{.Name}}" | grep project-v4-builder || docker buildx create --name project-v4-builder
 	docker buildx use project-v4-builder
-	- docker buildx build $(BUILDX_OUTPUT) --platform=$(PLATFORMS) --tag ${IMAGE} $(BUILDX_ADDITIONAL_TAGS) $(BUILDX_BUILD_ARGS) -f Dockerfile.cross .
-	- docker buildx rm project-v4-builder
+	docker buildx build $(BUILDX_OUTPUT) --platform=$(PLATFORMS) --tag ${IMAGE} $(BUILDX_ADDITIONAL_TAGS) $(BUILDX_BUILD_ARGS) -f Dockerfile.cross .
+	docker buildx rm project-v4-builder
 	rm Dockerfile.cross
 
 ##@ Deployment
@@ -388,7 +397,7 @@ OPM ?= $(LOCALBIN)/opm
 OPERATOR_SDK_VERSION ?= v1.34.1
 HELM_VERSION ?= v3.14.3
 CONTROLLER_TOOLS_VERSION ?= v0.14.0
-OPM_VERSION ?= v1.37.0
+OPM_VERSION ?= v1.38.0
 
 .PHONY: helm $(HELM)
 helm: $(HELM) ## Download helm to bin directory. If wrong version is installed, it will be overwritten.
@@ -454,7 +463,7 @@ bundle-push: ## Push the bundle image.
 
 .PHONY: bundle-publish
 bundle-publish: ## Create a PR for publishing in OperatorHub.
-	export GIT_USER=$(GITHUB_USER); \
+	@export GIT_USER=$(GITHUB_USER); \
 	export GITHUB_TOKEN=$(GITHUB_TOKEN); \
 	export OPERATOR_VERSION=$(OPERATOR_VERSION); \
 	export OPERATOR_NAME=$(OPERATOR_NAME); \

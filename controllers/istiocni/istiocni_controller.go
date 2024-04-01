@@ -16,23 +16,25 @@ package istiocni
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"reflect"
 
 	"github.com/go-logr/logr"
 	"github.com/istio-ecosystem/sail-operator/api/v1alpha1"
-	"github.com/istio-ecosystem/sail-operator/pkg/common"
+	"github.com/istio-ecosystem/sail-operator/pkg/config"
+	"github.com/istio-ecosystem/sail-operator/pkg/constants"
+	"github.com/istio-ecosystem/sail-operator/pkg/errlist"
 	"github.com/istio-ecosystem/sail-operator/pkg/helm"
 	"github.com/istio-ecosystem/sail-operator/pkg/kube"
 	"github.com/istio-ecosystem/sail-operator/pkg/profiles"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -43,7 +45,10 @@ import (
 	"istio.io/istio/pkg/ptr"
 )
 
-const cniReleaseName = "istio-cni"
+const (
+	cniReleaseName = "istio-cni"
+	finalizer      = constants.FinalizerName
+)
 
 // IstioCNIReconciler reconciles an IstioCNI object
 type IstioCNIReconciler struct {
@@ -54,8 +59,8 @@ type IstioCNIReconciler struct {
 	ChartManager *helm.ChartManager
 }
 
-func NewIstioCNIReconciler(client client.Client, scheme *runtime.Scheme, restConfig *rest.Config,
-	resourceDir string, chartManager *helm.ChartManager, defaultProfiles []string,
+func NewIstioCNIReconciler(
+	client client.Client, scheme *runtime.Scheme, resourceDir string, chartManager *helm.ChartManager, defaultProfiles []string,
 ) *IstioCNIReconciler {
 	return &IstioCNIReconciler{
 		ResourceDirectory: resourceDir,
@@ -90,26 +95,22 @@ func (r *IstioCNIReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	log := logf.FromContext(ctx)
 	var cni v1alpha1.IstioCNI
 	if err := r.Client.Get(ctx, req.NamespacedName, &cni); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			log.V(2).Info("IstioCNI not found. Skipping reconciliation")
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "failed to get IstioCNI from cluster")
+		return ctrl.Result{}, fmt.Errorf("failed to get IstioCNI: %v", err)
 	}
 
 	if cni.DeletionTimestamp != nil {
 		if err := r.uninstallHelmChart(ctx, &cni); err != nil {
 			return ctrl.Result{}, err
 		}
-		return kube.RemoveFinalizer(ctx, &cni, r.Client)
+		return kube.RemoveFinalizer(ctx, r.Client, &cni, finalizer)
 	}
 
-	if !kube.HasFinalizer(&cni) {
-		err := kube.AddFinalizer(ctx, &cni, r.Client)
-		if err != nil {
-			log.Info("failed to add finalizer")
-			return ctrl.Result{}, err
-		}
+	if !kube.HasFinalizer(&cni, finalizer) {
+		return kube.AddFinalizer(ctx, r.Client, &cni, finalizer)
 	}
 
 	if err := validateIstioCNI(cni); err != nil {
@@ -117,12 +118,12 @@ func (r *IstioCNIReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	log.Info("Installing components")
-	err := r.installHelmChart(ctx, &cni)
+	reconcileErr := r.installHelmChart(ctx, &cni)
 
 	log.Info("Reconciliation done. Updating status.")
-	err = r.updateStatus(ctx, &cni, err)
+	statusErr := r.updateStatus(ctx, &cni, reconcileErr)
 
-	return ctrl.Result{}, err
+	return ctrl.Result{}, errors.Join(reconcileErr, statusErr)
 }
 
 func validateIstioCNI(cni v1alpha1.IstioCNI) error {
@@ -149,10 +150,10 @@ func (r *IstioCNIReconciler) installHelmChart(ctx context.Context, cni *v1alpha1
 	userValues := cni.Spec.Values
 
 	// apply image digests from configuration, if not already set by user
-	userValues = applyImageDigests(cni, userValues, common.Config)
+	userValues = applyImageDigests(cni, userValues, config.Config)
 
 	// apply userValues on top of defaultValues from profiles
-	mergedHelmValues, err := profiles.Apply(getProfilesDir(r.ResourceDirectory, cni), getProfiles(cni, r.DefaultProfiles), userValues.ToHelmValues())
+	mergedHelmValues, err := profiles.Apply(getProfilesDir(r.ResourceDirectory, cni), getProfiles(cni, r.DefaultProfiles), helm.FromValues(userValues))
 	if err != nil {
 		return err
 	}
@@ -176,7 +177,7 @@ func getProfilesDir(resourceDir string, cni *v1alpha1.IstioCNI) string {
 	return path.Join(resourceDir, cni.Spec.Version, "profiles")
 }
 
-func applyImageDigests(cni *v1alpha1.IstioCNI, values *v1alpha1.CNIValues, config common.OperatorConfig) *v1alpha1.CNIValues {
+func applyImageDigests(cni *v1alpha1.IstioCNI, values *v1alpha1.CNIValues, config config.OperatorConfig) *v1alpha1.CNIValues {
 	imageDigests, digestsDefined := config.ImageDigests[cni.Spec.Version]
 	// if we don't have default image digests defined for this version, it's a no-op
 	if !digestsDefined {
@@ -235,91 +236,81 @@ func (r *IstioCNIReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *IstioCNIReconciler) updateStatus(ctx context.Context, cni *v1alpha1.IstioCNI, err error) error {
-	log := logf.FromContext(ctx)
-	reconciledCondition := r.determineReconciledCondition(err)
-	readyCondition := r.determineReadyCondition(ctx, cni)
-	if err != nil {
-		return err
-	}
+func (r *IstioCNIReconciler) determineStatus(ctx context.Context, cni *v1alpha1.IstioCNI, reconcileErr error) (v1alpha1.IstioCNIStatus, error) {
+	var errs errlist.Builder
+	reconciledCondition := r.determineReconciledCondition(reconcileErr)
+	readyCondition, err := r.determineReadyCondition(ctx, cni)
+	errs.Add(err)
 
-	status := cni.Status.DeepCopy()
+	status := *cni.Status.DeepCopy()
 	status.ObservedGeneration = cni.Generation
 	status.SetCondition(reconciledCondition)
 	status.SetCondition(readyCondition)
 	status.State = deriveState(reconciledCondition, readyCondition)
+	return status, errs.Error()
+}
 
-	if reflect.DeepEqual(cni.Status, *status) {
-		return nil
+func (r *IstioCNIReconciler) updateStatus(ctx context.Context, cni *v1alpha1.IstioCNI, reconcileErr error) error {
+	var errs errlist.Builder
+
+	status, err := r.determineStatus(ctx, cni, reconcileErr)
+	errs.Add(err)
+
+	if !reflect.DeepEqual(cni.Status, status) {
+		errs.Add(r.Client.Status().Patch(ctx, cni, kube.NewStatusPatch(status)))
 	}
-
-	statusErr := r.Client.Status().Patch(ctx, cni, kube.NewStatusPatch(*status))
-	if statusErr != nil {
-		log.Error(statusErr, "failed to patch status")
-
-		// ensure that we retry the reconcile by returning the status error
-		// (but without overriding the original error)
-		if err == nil {
-			return statusErr
-		}
-	}
-	return err
+	return errs.Error()
 }
 
 func deriveState(reconciledCondition, readyCondition v1alpha1.IstioCNICondition) v1alpha1.IstioCNIConditionReason {
-	if reconciledCondition.Status == metav1.ConditionFalse {
+	if reconciledCondition.Status != metav1.ConditionTrue {
 		return reconciledCondition.Reason
-	} else if readyCondition.Status == metav1.ConditionFalse {
+	} else if readyCondition.Status != metav1.ConditionTrue {
 		return readyCondition.Reason
 	}
-
-	return v1alpha1.IstioCNIConditionReasonHealthy
+	return v1alpha1.IstioCNIReasonHealthy
 }
 
 func (r *IstioCNIReconciler) determineReconciledCondition(err error) v1alpha1.IstioCNICondition {
-	if err == nil {
-		return v1alpha1.IstioCNICondition{
-			Type:   v1alpha1.IstioCNIConditionTypeReconciled,
-			Status: metav1.ConditionTrue,
-		}
-	}
+	c := v1alpha1.IstioCNICondition{Type: v1alpha1.IstioCNIConditionReconciled}
 
-	return v1alpha1.IstioCNICondition{
-		Type:    v1alpha1.IstioCNIConditionTypeReconciled,
-		Status:  metav1.ConditionFalse,
-		Reason:  v1alpha1.IstioCNIConditionReasonReconcileError,
-		Message: fmt.Sprintf("error reconciling resource: %v", err),
+	if err == nil {
+		c.Status = metav1.ConditionTrue
+	} else {
+		c.Status = metav1.ConditionFalse
+		c.Reason = v1alpha1.IstioCNIReasonReconcileError
+		c.Message = fmt.Sprintf("error reconciling resource: %v", err)
 	}
+	return c
 }
 
-func (r *IstioCNIReconciler) determineReadyCondition(ctx context.Context, cni *v1alpha1.IstioCNI) v1alpha1.IstioCNICondition {
-	notReady := func(reason v1alpha1.IstioCNIConditionReason, message string) v1alpha1.IstioCNICondition {
-		return v1alpha1.IstioCNICondition{
-			Type:    v1alpha1.IstioCNIConditionTypeReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  reason,
-			Message: message,
+func (r *IstioCNIReconciler) determineReadyCondition(ctx context.Context, cni *v1alpha1.IstioCNI) (v1alpha1.IstioCNICondition, error) {
+	c := v1alpha1.IstioCNICondition{
+		Type:   v1alpha1.IstioCNIConditionReady,
+		Status: metav1.ConditionFalse,
+	}
+
+	ds := appsv1.DaemonSet{}
+	if err := r.Client.Get(ctx, r.cniDaemonSetKey(cni), &ds); err == nil {
+		if ds.Status.CurrentNumberScheduled == 0 {
+			c.Reason = v1alpha1.IstioCNIDaemonSetNotReady
+			c.Message = "no istio-cni-node pods are currently scheduled"
+		} else if ds.Status.NumberReady < ds.Status.CurrentNumberScheduled {
+			c.Reason = v1alpha1.IstioCNIDaemonSetNotReady
+			c.Message = "not all istio-cni-node pods are ready"
+		} else {
+			c.Status = metav1.ConditionTrue
 		}
+	} else if apierrors.IsNotFound(err) {
+		c.Reason = v1alpha1.IstioCNIDaemonSetNotReady
+		c.Message = "istio-cni-node DaemonSet not found"
+	} else {
+		c.Status = metav1.ConditionUnknown
+		c.Reason = v1alpha1.IstioCNIReasonReadinessCheckFailed
+		c.Message = fmt.Sprintf("failed to get readiness: %v", err)
+		return c, err
 	}
-
-	daemonSet := appsv1.DaemonSet{}
-	if err := r.Client.Get(ctx, r.cniDaemonSetKey(cni), &daemonSet); err != nil {
-		if errors.IsNotFound(err) {
-			return notReady(v1alpha1.IstioCNIConditionReasonCNINotReady, "istio-cni-node DaemonSet not found")
-		}
-		return notReady(v1alpha1.IstioCNIConditionReasonReconcileError, fmt.Sprintf("failed to get readiness: %v", err))
-	}
-
-	if daemonSet.Status.CurrentNumberScheduled == 0 {
-		return notReady(v1alpha1.IstioCNIConditionReasonCNINotReady, "no istio-cni-node pods are currently scheduled")
-	} else if daemonSet.Status.NumberReady < daemonSet.Status.CurrentNumberScheduled {
-		return notReady(v1alpha1.IstioCNIConditionReasonCNINotReady, "not all istio-cni-node pods are ready")
-	}
-
-	return v1alpha1.IstioCNICondition{
-		Type:   v1alpha1.IstioCNIConditionTypeReady,
-		Status: metav1.ConditionTrue,
-	}
+	return c, nil
 }
 
 func (r *IstioCNIReconciler) cniDaemonSetKey(cni *v1alpha1.IstioCNI) client.ObjectKey {
