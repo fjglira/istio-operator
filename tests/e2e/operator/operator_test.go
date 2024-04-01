@@ -43,12 +43,6 @@ import (
 
 var (
 	istiodVersionRegex = regexp.MustCompile(`Version:"(\d+\.\d+(\.\d+|-\w+))`)
-	deployment         = &appsv1.Deployment{}
-	crd                = &apiextensionsv1.CustomResourceDefinition{}
-	crdList            = &apiextensionsv1.CustomResourceDefinitionList{}
-	daemonset          = &appsv1.DaemonSet{}
-	cni                = &v1alpha1.IstioCNI{}
-	istio              = &v1alpha1.Istio{}
 	sailCRDs           = []string{
 		// TODO: Find an alternative to this list
 		"authorizationpolicies.security.istio.io",
@@ -94,14 +88,14 @@ var _ = Describe("Operator", Ordered, func() {
 		})
 
 		It("deploys all the CRDs", func(ctx SpecContext) {
-			Eventually(getList).WithArguments(ctx, cl, crdList).Should(WithTransform(extractCRDNames, ContainElements(sailCRDs)),
+			Eventually(getList).WithArguments(ctx, cl, &apiextensionsv1.CustomResourceDefinitionList{}).Should(WithTransform(extractCRDNames, ContainElements(sailCRDs)),
 				"Not all Istio and Sail CRDs are present")
 			Success("Istio CRDs are present")
 		})
 
 		It("updates the CRDs status to Established", func(ctx SpecContext) {
 			for _, crdName := range sailCRDs {
-				Eventually(getObject).WithArguments(ctx, cl, key(crdName), crd).
+				Eventually(getObject).WithArguments(ctx, cl, key(crdName), &apiextensionsv1.CustomResourceDefinition{}).
 					Should(HaveCondition(apiextensionsv1.Established, metav1.ConditionTrue), "Error getting Istio CRD")
 			}
 			Success("CRDs are Established")
@@ -109,13 +103,13 @@ var _ = Describe("Operator", Ordered, func() {
 
 		Specify("istio crd is present", func(ctx SpecContext) {
 			// When the operator runs in OCP cluster, the CRD is created but not available at the moment
-			Eventually(cl.Get).WithArguments(ctx, key("istios.operator.istio.io"), crd).
+			Eventually(cl.Get).WithArguments(ctx, key("istios.operator.istio.io"), &apiextensionsv1.CustomResourceDefinition{}).
 				Should(Succeed(), "Error getting Istio CRD")
 			Success("Istio CRD is present")
 		})
 
 		It("starts successfully", func(ctx SpecContext) {
-			Eventually(getObject).WithArguments(ctx, cl, key(deploymentName, namespace), deployment).
+			Eventually(getObject).WithArguments(ctx, cl, key(deploymentName, namespace), &appsv1.Deployment{}).
 				Should(HaveCondition(appsv1.DeploymentAvailable, metav1.ConditionTrue), "Error getting Istio CRD")
 		})
 
@@ -155,6 +149,7 @@ spec:
 
 					It("deploys the CNI DaemonSet", func(ctx SpecContext) {
 						Eventually(func(g Gomega) {
+							daemonset := &appsv1.DaemonSet{}
 							g.Expect(cl.Get(ctx, key("istio-cni-node", istioCniNamespace), daemonset)).To(Succeed(), "Error getting IstioCNI DaemonSet")
 							g.Expect(daemonset.Status.NumberAvailable).
 								To(Equal(daemonset.Status.CurrentNumberScheduled), "CNI DaemonSet Pods not Available; expected numberAvailable to be equal to currentNumberScheduled")
@@ -163,13 +158,13 @@ spec:
 					})
 
 					It("updates the status to Reconciled", func(ctx SpecContext) {
-						Eventually(getObject).WithArguments(ctx, cl, key(istioCniName), cni).
+						Eventually(getObject).WithArguments(ctx, cl, key(istioCniName), &v1alpha1.IstioCNI{}).
 							Should(HaveCondition(v1alpha1.IstioCNIConditionTypeReconciled, metav1.ConditionTrue), "IstioCNI is not Reconciled; unexpected Condition")
 						Success("IstioCNI is Reconciled")
 					})
 
 					It("updates the status to Ready", func(ctx SpecContext) {
-						Eventually(getObject).WithArguments(ctx, cl, key(istioCniName), cni).
+						Eventually(getObject).WithArguments(ctx, cl, key(istioCniName), &v1alpha1.IstioCNI{}).
 							Should(HaveCondition(v1alpha1.IstioCNIConditionTypeReady, metav1.ConditionTrue), "IstioCNI is not Ready; unexpected Condition")
 						Success("IstioCNI is Ready")
 					})
@@ -199,19 +194,19 @@ spec:
 					})
 
 					It("updates the Istio CR status to Reconciled", func(ctx SpecContext) {
-						Eventually(getObject).WithArguments(ctx, cl, key(istioName), istio).
+						Eventually(getObject).WithArguments(ctx, cl, key(istioName), &v1alpha1.Istio{}).
 							Should(HaveCondition(v1alpha1.IstioConditionTypeReconciled, metav1.ConditionTrue), "Istio is not Reconciled; unexpected Condition")
 						Success("Istio CR is Reconciled")
 					})
 
 					It("updates the Istio CR status to Ready", func(ctx SpecContext) {
-						Eventually(getObject).WithArguments(ctx, cl, key(istioName), istio).
+						Eventually(getObject).WithArguments(ctx, cl, key(istioName), &v1alpha1.Istio{}).
 							Should(HaveCondition(v1alpha1.IstioConditionTypeReady, metav1.ConditionTrue), "Istio is not Ready; unexpected Condition")
 						Success("Istio CR is Ready")
 					})
 
 					It("deploys istiod", func(ctx SpecContext) {
-						Eventually(getObject).WithArguments(ctx, cl, key("istiod", controlPlaneNamespace), deployment).
+						Eventually(getObject).WithArguments(ctx, cl, key("istiod", controlPlaneNamespace), &appsv1.Deployment{}).
 							Should(HaveCondition(appsv1.DeploymentAvailable, metav1.ConditionTrue), "Istiod is not Available; unexpected Condition")
 						Expect(getVersionFromIstiod()).To(Equal(version.Version), "Unexpected istiod version")
 						Success("Istiod is deployed in the namespace and Running")
@@ -231,7 +226,7 @@ spec:
 					})
 
 					It("removes everything from the namespace", func(ctx SpecContext) {
-						Eventually(cl.Get).WithArguments(ctx, key("istiod", controlPlaneNamespace), deployment).
+						Eventually(cl.Get).WithArguments(ctx, key("istiod", controlPlaneNamespace), &appsv1.Deployment{}).
 							Should(ReturnNotFoundError(), "Istiod should not exist anymore")
 						checkNamespaceEmpty(ctx, controlPlaneNamespace)
 						Success("Namespace is empty")
@@ -245,6 +240,7 @@ spec:
 					})
 
 					It("removes everything from the CNI namespace", func(ctx SpecContext) {
+						daemonset := &appsv1.DaemonSet{}
 						Eventually(cl.Get).WithArguments(ctx, key("istio-cni-node", istioCniNamespace), daemonset).
 							Should(ReturnNotFoundError(), "IstioCNI DaemonSet should not exist anymore")
 						checkNamespaceEmpty(ctx, istioCniNamespace)
