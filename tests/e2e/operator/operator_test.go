@@ -159,13 +159,13 @@ spec:
 
 					It("updates the status to Reconciled", func(ctx SpecContext) {
 						Eventually(getObject).WithArguments(ctx, cl, key(istioCniName), &v1alpha1.IstioCNI{}).
-							Should(HaveCondition(v1alpha1.IstioCNIConditionTypeReconciled, metav1.ConditionTrue), "IstioCNI is not Reconciled; unexpected Condition")
+							Should(HaveCondition(v1alpha1.IstioCNIConditionReconciled, metav1.ConditionTrue), "IstioCNI is not Reconciled; unexpected Condition")
 						Success("IstioCNI is Reconciled")
 					})
 
 					It("updates the status to Ready", func(ctx SpecContext) {
 						Eventually(getObject).WithArguments(ctx, cl, key(istioCniName), &v1alpha1.IstioCNI{}).
-							Should(HaveCondition(v1alpha1.IstioCNIConditionTypeReady, metav1.ConditionTrue), "IstioCNI is not Ready; unexpected Condition")
+							Should(HaveCondition(v1alpha1.IstioCNIConditionReady, metav1.ConditionTrue), "IstioCNI is not Ready; unexpected Condition")
 						Success("IstioCNI is Ready")
 					})
 
@@ -195,13 +195,13 @@ spec:
 
 					It("updates the Istio CR status to Reconciled", func(ctx SpecContext) {
 						Eventually(getObject).WithArguments(ctx, cl, key(istioName), &v1alpha1.Istio{}).
-							Should(HaveCondition(v1alpha1.IstioConditionTypeReconciled, metav1.ConditionTrue), "Istio is not Reconciled; unexpected Condition")
+							Should(HaveCondition(v1alpha1.IstioConditionReconciled, metav1.ConditionTrue), "Istio is not Reconciled; unexpected Condition")
 						Success("Istio CR is Reconciled")
 					})
 
 					It("updates the Istio CR status to Ready", func(ctx SpecContext) {
 						Eventually(getObject).WithArguments(ctx, cl, key(istioName), &v1alpha1.Istio{}).
-							Should(HaveCondition(v1alpha1.IstioConditionTypeReady, metav1.ConditionTrue), "Istio is not Ready; unexpected Condition")
+							Should(HaveCondition(v1alpha1.IstioConditionReady, metav1.ConditionTrue), "Istio is not Ready; unexpected Condition")
 						Success("Istio CR is Ready")
 					})
 
